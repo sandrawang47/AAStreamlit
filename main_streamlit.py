@@ -41,11 +41,11 @@ class AmazonAPI:
             "ItemCount": item_count,
             "Resources": [
                 "BrowseNodeInfo.BrowseNodes",
+                "BrowseNodeInfo.BrowseNodes.SalesRank",
                 "BrowseNodeInfo.WebsiteSalesRank",
-                "CustomerReviews.Count",
-                "CustomerReviews.StarRating",
                 "Images.Primary.Large",
                 "Images.Primary.Medium",
+                "Images.Primary.Small",
                 "Images.Variants.Large",
                 "ItemInfo.ByLineInfo",
                 "ItemInfo.ContentInfo",
@@ -193,9 +193,11 @@ def extract_product_data(item):
         data['is_prime'] = listing.get('DeliveryInfo', {}).get('IsPrimeEligible', False)
         data['is_amazon_fulfilled'] = listing.get('DeliveryInfo', {}).get('IsAmazonFulfilled', False)
         
+        # Get merchant info - THIS IS THE FIX FOR RATING
         merchant = listing.get('MerchantInfo', {})
         data['merchant_name'] = merchant.get('Name', 'Amazon')
-        data['merchant_rating'] = merchant.get('FeedbackRating', 'N/A')
+        data['merchant_rating'] = merchant.get('FeedbackRating', None)
+        data['merchant_feedback_count'] = merchant.get('FeedbackCount', None)
     else:
         data['price'] = 'N/A'
         data['price_amount'] = 0
@@ -203,21 +205,32 @@ def extract_product_data(item):
         data['is_prime'] = False
         data['is_amazon_fulfilled'] = False
         data['merchant_name'] = 'N/A'
-        data['merchant_rating'] = 'N/A'
+        data['merchant_rating'] = None
+        data['merchant_feedback_count'] = None
     
-    # Reviews
+    # Customer Reviews (different from merchant feedback)
     reviews = item.get('CustomerReviews', {})
-    data['rating'] = reviews.get('StarRating', {}).get('Value', 'N/A')
-    data['review_count'] = reviews.get('Count', 0)
+    customer_rating = reviews.get('StarRating', {}).get('Value', None)
+    customer_review_count = reviews.get('Count', None)
+    
+    data['customer_rating'] = customer_rating
+    data['customer_review_count'] = customer_review_count
     
     # Sales Rank
     sales_rank = item.get('BrowseNodeInfo', {}).get('WebsiteSalesRank', {}).get('SalesRank', None)
+    if not sales_rank:
+        # Try to get from browse nodes
+        browse_nodes = item.get('BrowseNodeInfo', {}).get('BrowseNodes', [])
+        if browse_nodes:
+            sales_rank = browse_nodes[0].get('SalesRank', None)
+    
     data['sales_rank'] = sales_rank if sales_rank else 'N/A'
     
     # Images
     images = item.get('Images', {})
     data['image_url'] = images.get('Primary', {}).get('Large', {}).get('URL', '')
     data['image_medium'] = images.get('Primary', {}).get('Medium', {}).get('URL', '')
+    data['image_small'] = images.get('Primary', {}).get('Small', {}).get('URL', '')
     
     # Product details
     product_info = item.get('ItemInfo', {}).get('ProductInfo', {})
@@ -237,7 +250,13 @@ def format_social_post(product, platform='facebook'):
     """Format product info for social media"""
     title = product.get('title', 'Product')
     price = product.get('price', 'N/A')
-    rating = product.get('rating', 'N/A')
+    
+    # Use customer rating if available, otherwise merchant rating
+    rating = product.get('customer_rating')
+    if not rating:
+        rating = product.get('merchant_rating')
+    
+    rating_text = f"{rating} stars" if rating else "Great reviews"
     link = product.get('url', '')
     
     if platform == 'facebook':
@@ -246,7 +265,7 @@ def format_social_post(product, platform='facebook'):
 {title}
 
 💰 Price: {price}
-⭐ Rating: {rating} stars
+⭐ Rating: {rating_text}
 📦 Fast Shipping Available
 
 Get it now: {link}
@@ -256,7 +275,7 @@ Get it now: {link}
         post = f"""✨ {title} ✨
 
 💵 {price}
-⭐ {rating} stars
+⭐ {rating_text}
 
 Check out the link in bio! 🔗
 
@@ -312,30 +331,31 @@ if api:
                     st.success("✅ Connection Successful!")
 
 # Main content tabs
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🎄 Niche Search", 
-    "🦦 Trending Tracker", 
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🎄 Product Search & Bestsellers", 
+    "📈 Trending & Analysis",
     "📊 Product Details", 
-    "📱 Social Post Generator",
-    "🔥 Trend Analysis",
-    "🏆 Bestsellers"
+    "📱 Social Post Generator"
 ])
 
-# Tab 1: Niche Product Search
+# Tab 1: Combined Product Search and Bestsellers
+# Tab 1: Combined Product Search and Bestsellers
 with tab1:
-    st.header("Function 1: Niche Product Search")
-    st.markdown("Search for products in specific niches like Christmas-themed merch")
+    st.header("Function 1 & 6: Product Search & Bestsellers")
+    st.markdown("Search for products in any niche or find bestsellers by category")
     
-    col1, col2 = st.columns([3, 1])
+    col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
-        niche_query = st.text_input("Enter niche keywords", value="Christmas ornaments")
+        search_query = st.text_input("Enter keywords (e.g., 'Christmas ornaments', 'wireless earbuds')", value="sea otter plush")
     with col2:
-        niche_count = st.number_input("Results", 1, 10, 5)
+        result_count = st.number_input("Results", 1, 10, 5)
+    with col3:
+        search_index = st.selectbox("Category", ["All", "Toys", "Electronics", "Books", "Fashion", "Home"])
     
-    if st.button("🔍 Search Niche", key="niche_search"):
+    if st.button("🔍 Search Products", key="product_search"):
         if api:
             with st.spinner("Searching..."):
-                results = api.search_items(niche_query, niche_count)
+                results = api.search_items(search_query, result_count, search_index)
                 
                 if debug_mode:
                     with st.expander("🐛 Debug Info"):
@@ -363,10 +383,25 @@ with tab1:
                                 st.write(f"🏷️ **ASIN:** {product['asin']}")
                                 st.write(f"🏭 **Brand:** {product['brand']}")
                                 
-                                col1, col2, col3 = st.columns(3)
-                                col1.metric("💰 Price", product['price'])
-                                col2.metric("⭐ Rating", product['rating'])
-                                col3.metric("📝 Reviews", product['review_count'])
+                                # Display metrics
+                                metric_cols = st.columns(4)
+                                metric_cols[0].metric("💰 Price", product['price'])
+                                
+                                # Show merchant rating if available
+                                if product['merchant_rating']:
+                                    metric_cols[1].metric("⭐ Seller Rating", f"{product['merchant_rating']}")
+                                elif product['customer_rating']:
+                                    metric_cols[1].metric("⭐ Customer Rating", f"{product['customer_rating']}")
+                                else:
+                                    metric_cols[1].metric("⭐ Rating", "N/A")
+                                
+                                # Show feedback/review count if available
+                                if product['merchant_feedback_count']:
+                                    metric_cols[2].metric("📝 Seller Feedback", f"{product['merchant_feedback_count']:,}")
+                                elif product['customer_review_count']:
+                                    metric_cols[2].metric("📝 Reviews", f"{product['customer_review_count']:,}")
+                                
+                                metric_cols[3].metric("📊 Sales Rank", product['sales_rank'])
                                 
                                 st.write(f"📦 **Availability:** {product['availability']}")
                                 st.write(f"🏪 **Seller:** {product['merchant_name']}")
@@ -383,57 +418,120 @@ with tab1:
                     st.write("**Message:**", results.get('message', 'No details available'))
         else:
             st.warning("⚠️ Configure API credentials in the sidebar first!")
-
-# Tab 2: Trending Products Tracker
+# Tab 2: Combined Trending Tracker and Analysis
 with tab2:
-    st.header("Function 2: Daily Trending Products Tracker")
-    st.markdown("Track trending products with specific keywords - Export to CSV for daily tracking")
+    st.header("Function 2 & 5: Trending Products & Analysis")
+    st.markdown("Track trending products, analyze pricing, and monitor popularity metrics with visual thumbnails")
     
     col1, col2 = st.columns([3, 1])
     with col1:
-        trending_keyword = st.text_input("Trending keyword", value="sea otter plush")
+        trending_keyword = st.text_input("Trending keyword", value="trending gadgets 2024")
     with col2:
-        trending_count = st.number_input("Count", 5, 10, 5, key="trend_count")
+        trending_count = st.number_input("Count", 5, 10, 8, key="trend_count")
     
-    if st.button("📈 Get Trending Products", key="trending"):
+    if st.button("📈 Analyze Trending Products", key="trending"):
         if api:
-            with st.spinner("Fetching trending products..."):
+            with st.spinner("Fetching and analyzing trending products..."):
                 results = api.search_items(trending_keyword, trending_count)
                 
                 if 'SearchResult' in results:
                     items = results['SearchResult'].get('Items', [])
                     
                     if items:
+                        products = [extract_product_data(item) for item in items]
+                        
+                        # Calculate metrics
+                        prices = [p['price_amount'] for p in products if p['price_amount'] > 0]
+                        ratings_merchant = [p['merchant_rating'] for p in products if p['merchant_rating']]
+                        ratings_customer = [p['customer_rating'] for p in products if p['customer_rating']]
+                        all_ratings = ratings_customer if ratings_customer else ratings_merchant
+                        
+                        # Display summary metrics
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Avg Price", f"${sum(prices)/len(prices):.2f}" if prices else "N/A")
+                        with col2:
+                            st.metric("Avg Rating", f"{sum(all_ratings)/len(all_ratings):.1f} ⭐" if all_ratings else "N/A")
+                        with col3:
+                            prime_count = sum(1 for p in products if p['is_prime'])
+                            st.metric("Prime Products", f"{prime_count}/{len(products)}")
+                        with col4:
+                            amazon_fulfilled = sum(1 for p in products if p['is_amazon_fulfilled'])
+                            st.metric("Amazon Fulfilled", f"{amazon_fulfilled}/{len(products)}")
+                        
+                        st.markdown("---")
+                        st.subheader("📊 Product Comparison with Thumbnails")
+                        
+                        # Create DataFrame with image URLs
                         products_data = []
-                        for item in items:
-                            product = extract_product_data(item)
+                        for product in products:
+                            # Determine which rating to show
+                            rating_display = "N/A"
+                            rating_type = ""
+                            if product['customer_rating']:
+                                rating_display = f"{product['customer_rating']} ⭐"
+                                rating_type = " (Customer)"
+                            elif product['merchant_rating']:
+                                rating_display = f"{product['merchant_rating']} ⭐"
+                                rating_type = " (Seller)"
+                            
+                            # Determine feedback/review count
+                            feedback_display = ""
+                            if product['customer_review_count']:
+                                feedback_display = f"{product['customer_review_count']:,} reviews"
+                            elif product['merchant_feedback_count']:
+                                feedback_display = f"{product['merchant_feedback_count']:,} feedback"
+                            
                             products_data.append({
+                                'Image': product['image_small'],
                                 'ASIN': product['asin'],
-                                'Title': product['title'][:60],
+                                'Title': product['title'][:50] + '...',
                                 'Brand': product['brand'],
                                 'Price': product['price'],
-                                'Rating': product['rating'],
-                                'Reviews': product['review_count'],
+                                'Rating': rating_display + rating_type,
+                                'Feedback': feedback_display if feedback_display else "No data",
                                 'Sales Rank': product['sales_rank'],
                                 'Prime': '✓' if product['is_prime'] else '✗',
                                 'Availability': product['availability'],
                                 'URL': product['url']
                             })
                         
-                        df = pd.DataFrame(products_data)
-                        st.dataframe(df, use_container_width=True)
+                        # Display products with thumbnails
+                        for idx, (item_data, product) in enumerate(zip(products_data, products), 1):
+                            col_img, col_info = st.columns([1, 5])
+                            
+                            with col_img:
+                                if product['image_small']:
+                                    st.image(product['image_small'], width=80)
+                            
+                            with col_info:
+                                st.markdown(f"**#{idx}. {item_data['Title']}**")
+                                
+                                info_cols = st.columns(5)
+                                info_cols[0].write(f"💰 {item_data['Price']}")
+                                info_cols[1].write(f"{item_data['Rating']}")
+                                info_cols[2].write(f"📝 {item_data['Feedback']}")
+                                info_cols[3].write(f"📊 Rank: {item_data['Sales Rank']}")
+                                info_cols[4].write(f"Prime: {item_data['Prime']}")
+                                
+                                st.write(f"🏪 Seller: {product['merchant_name']} | [View Product]({item_data['URL']})")
+                            
+                            st.markdown("---")
                         
-                        # Download button
-                        csv = df.to_csv(index=False)
+                        # Create downloadable CSV
+                        df = pd.DataFrame(products_data)
+                        df_export = df.drop(columns=['Image'])  # Remove image URLs from CSV
+                        csv = df_export.to_csv(index=False)
+                        
                         st.download_button(
-                            "💾 Download CSV",
+                            "💾 Download Analysis CSV",
                             csv,
                             f"trending_{trending_keyword.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.csv",
                             "text/csv",
-                            key='download_csv'
+                            key='download_trending'
                         )
                         
-                        st.success(f"✅ Ready for daily tracking! Save this CSV daily to monitor trends.")
+                        st.success(f"✅ Analysis complete! Found {len(products)} products. Save CSV for daily tracking.")
                     else:
                         st.warning("No items found")
                 elif 'error' in results:
@@ -487,14 +585,33 @@ with tab3:
                                 st.write(f"🏷️ **ASIN:** {product['asin']}")
                                 st.write(f"🏭 **Brand:** {product['brand']} by {product['manufacturer']}")
                                 
-                                col_a, col_b, col_c, col_d = st.columns(4)
-                                col_a.metric("💰 Price", product['price'])
-                                col_b.metric("⭐ Rating", product['rating'])
-                                col_c.metric("📝 Reviews", product['review_count'])
-                                col_d.metric("📊 Sales Rank", product['sales_rank'])
+                                # Display all available metrics
+                                metric_cols = st.columns(4)
+                                metric_cols[0].metric("💰 Price", product['price'])
+                                
+                                # Customer rating/reviews
+                                if product['customer_rating']:
+                                    metric_cols[1].metric("⭐ Customer Rating", f"{product['customer_rating']}")
+                                    if product['customer_review_count']:
+                                        metric_cols[2].metric("📝 Customer Reviews", f"{product['customer_review_count']:,}")
+                                
+                                # Seller rating/feedback
+                                if product['merchant_rating']:
+                                    if not product['customer_rating']:
+                                        metric_cols[1].metric("⭐ Seller Rating", f"{product['merchant_rating']}")
+                                    else:
+                                        st.write(f"🏪 **Seller Rating:** {product['merchant_rating']}")
+                                    
+                                    if product['merchant_feedback_count']:
+                                        if not product['customer_review_count']:
+                                            metric_cols[2].metric("📝 Seller Feedback", f"{product['merchant_feedback_count']:,}")
+                                        else:
+                                            st.write(f"📝 **Seller Feedback:** {product['merchant_feedback_count']:,}")
+                                
+                                metric_cols[3].metric("📊 Sales Rank", product['sales_rank'])
                                 
                                 st.write(f"📦 **Availability:** {product['availability']}")
-                                st.write(f"🏪 **Seller:** {product['merchant_name']} (Rating: {product['merchant_rating']})")
+                                st.write(f"🏪 **Seller:** {product['merchant_name']}")
                                 st.write(f"🎨 **Color:** {product['color']} | 📏 **Size:** {product['size']}")
                                 
                                 if product['is_prime']:
@@ -554,130 +671,23 @@ with tab4:
                                     
                                     st.write("**Product Details:**")
                                     st.write(f"• Price: {product['price']}")
-                                    st.write(f"• Rating: {product['rating']} ⭐ ({product['review_count']} reviews)")
+                                    
+                                    # Show rating info
+                                    if product['customer_rating']:
+                                        st.write(f"• Customer Rating: {product['customer_rating']} ⭐")
+                                        if product['customer_review_count']:
+                                            st.write(f"• Reviews: {product['customer_review_count']:,}")
+                                    elif product['merchant_rating']:
+                                        st.write(f"• Seller Rating: {product['merchant_rating']} ⭐")
+                                        if product['merchant_feedback_count']:
+                                            st.write(f"• Seller Feedback: {product['merchant_feedback_count']:,}")
+                                    
                                     st.write(f"• ASIN: {product['asin']}")
                                     
+                                    if product['is_prime']:
+                                        st.success("✓ Prime Eligible - Great for fast shipping promotions!")
+                                    
                                     st.info(f"💡 **Tip:** Download the image and paste this text into {platform.title()}")
-                    else:
-                        st.warning("No products found")
-                elif 'error' in results:
-                    st.error(f"❌ Error: {results.get('error')}")
-                    st.write(results.get('message'))
-        else:
-            st.warning("Configure API credentials first!")
-
-# Tab 5: Trend Analysis
-with tab5:
-    st.header("Function 5: Trend Analysis Dashboard")
-    st.markdown("Analyze product trends, pricing, and popularity metrics")
-    
-    analysis_keyword = st.text_input("Analysis keyword", value="wireless earbuds")
-    
-    if st.button("📊 Analyze Trends", key="analyze"):
-        if api:
-            with st.spinner("Analyzing trends..."):
-                results = api.search_items(analysis_keyword, 10)
-                
-                if 'SearchResult' in results:
-                    items = results['SearchResult'].get('Items', [])
-                    
-                    if items:
-                        products = [extract_product_data(item) for item in items]
-                        
-                        # Calculate metrics
-                        prices = [p['price_amount'] for p in products if p['price_amount'] > 0]
-                        ratings = [float(p['rating']) for p in products if p['rating'] != 'N/A']
-                        reviews = [p['review_count'] for p in products]
-                        
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Avg Price", f"${sum(prices)/len(prices):.2f}" if prices else "N/A")
-                        with col2:
-                            st.metric("Avg Rating", f"{sum(ratings)/len(ratings):.1f} ⭐" if ratings else "N/A")
-                        with col3:
-                            st.metric("Total Reviews", f"{sum(reviews):,}")
-                        with col4:
-                            prime_count = sum(1 for p in products if p['is_prime'])
-                            st.metric("Prime Products", f"{prime_count}/{len(products)}")
-                        
-                        # Data table
-                        df = pd.DataFrame({
-                            'Product': [p['title'][:40] + '...' for p in products],
-                            'Brand': [p['brand'] for p in products],
-                            'Price': [p['price'] for p in products],
-                            'Rating': [p['rating'] for p in products],
-                            'Reviews': [p['review_count'] for p in products],
-                            'Sales Rank': [p['sales_rank'] for p in products],
-                            'Prime': ['✓' if p['is_prime'] else '✗' for p in products]
-                        })
-                        
-                        st.subheader("📈 Product Comparison Table")
-                        st.dataframe(df, use_container_width=True)
-                        
-                        # Top performers
-                        st.subheader("🏆 Top Rated Products")
-                        df_sorted = df.sort_values('Reviews', ascending=False).head(5)
-                        st.bar_chart(df_sorted.set_index('Product')['Reviews'])
-                        
-                        # Download analysis
-                        csv = df.to_csv(index=False)
-                        st.download_button(
-                            "💾 Download Analysis",
-                            csv,
-                            f"analysis_{analysis_keyword.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.csv",
-                            "text/csv"
-                        )
-                    else:
-                        st.warning("No products found")
-                elif 'error' in results:
-                    st.error(f"❌ Error: {results.get('error')}")
-                    st.write(results.get('message'))
-        else:
-            st.warning("Configure API credentials first!")
-
-
-# Tab 6: Bestsellers
-with tab6:
-    st.header("Function 6: Amazon Bestsellers")
-    st.markdown("Get current bestselling products from Amazon")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        bestseller_category = st.text_input("Category keyword", value="electronics")
-    with col2:
-        bestseller_count = st.number_input("Results", 5, 10, 10, key="best_count")
-    
-    if st.button("🏆 Get Bestsellers", key="bestsellers"):
-        if api:
-            with st.spinner("Fetching bestsellers..."):
-                results = api.search_items(bestseller_category, bestseller_count)
-                
-                if 'SearchResult' in results:
-                    items = results['SearchResult'].get('Items', [])
-                    
-                    if items:
-                        st.success(f"Top {len(items)} Bestsellers")
-                        
-                        for idx, item in enumerate(items, 1):
-                            with st.container():
-                                col1, col2 = st.columns([1, 3])
-                                
-                                with col1:
-                                    if 'Images' in item and 'Primary' in item['Images']:
-                                        st.image(item['Images']['Primary']['Large']['URL'])
-                                
-                                with col2:
-                                    st.markdown(f"### #{idx} {item.get('ItemInfo', {}).get('Title', {}).get('DisplayValue', 'N/A')}")
-                                    
-                                    price = item.get('Offers', {}).get('Listings', [{}])[0].get('Price', {}).get('DisplayAmount', 'N/A')
-                                    rating = item.get('CustomerReviews', {}).get('StarRating', {}).get('Value', 'N/A')
-                                    
-                                    col_a, col_b, col_c = st.columns(3)
-                                    col_a.metric("Price", price)
-                                    col_b.metric("Rating", f"{rating} ⭐")
-                                    col_c.write(f"[View on Amazon]({item.get('DetailPageURL', '#')})")
-                                
-                                st.markdown("---")
                     else:
                         st.warning("No products found")
                 elif 'error' in results:
